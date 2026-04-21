@@ -278,10 +278,21 @@ def random_clifford_state(seed: int | None = None,
 # Registry
 # ---------------------------------------------------------------------------
 
+def random_mps_chi2(seed: int | None = None) -> np.ndarray:
+    return random_mps(seed=seed, chi=2)
+
+
+def random_mps_chi4(seed: int | None = None) -> np.ndarray:
+    return random_mps(seed=seed, chi=4)
+
+
+# `mps` (chi=16) retained for v1/v2 compatibility; v3 adds the lower-chi keys.
 STATE_GENERATORS = {
     "haar": haar_random,
     "tfim": tfim_ground_state,
     "mps": random_mps,
     "heisenberg": heisenberg_ground_state,
     "clifford": random_clifford_state,
+    "mps_chi2": random_mps_chi2,
+    "mps_chi4": random_mps_chi4,
 }

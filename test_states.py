@@ -108,6 +108,38 @@ def test_clifford_stochastic() -> bool:
 
 
 # ---------------------------------------------------------------------------
+# MPS at chi in {2, 4, 16}
+# ---------------------------------------------------------------------------
+
+def test_mps_all_chi_unit_norm_and_dtype() -> bool:
+    fail = []
+    for name, chi in [("mps_chi2", 2), ("mps_chi4", 4), ("mps", 16)]:
+        psi = states.STATE_GENERATORS[name](seed=0)
+        if psi.shape != (1024,) or psi.dtype != np.complex128:
+            fail.append(f"{name}: shape={psi.shape} dtype={psi.dtype}")
+        elif abs(np.linalg.norm(psi) - 1.0) > 1e-10:
+            fail.append(f"{name}: |||psi||-1|={abs(np.linalg.norm(psi)-1.0):.2e}")
+    return _check("MPS chi=2/4/16: shape, dtype, unit norm",
+                  not fail, "; ".join(fail) if fail else "")
+
+
+def test_mps_stochastic() -> bool:
+    """Different seeds produce different states (stochastic), same seed bit-identical."""
+    fail = []
+    for name in ("mps_chi2", "mps_chi4"):
+        gen = states.STATE_GENERATORS[name]
+        a = gen(seed=0)
+        b = gen(seed=0)
+        c = gen(seed=1)
+        if not np.array_equal(a, b):
+            fail.append(f"{name}: same seed produced different states")
+        if np.array_equal(a, c):
+            fail.append(f"{name}: different seeds produced same state")
+    return _check("MPS chi=2/4 stochastic w/ deterministic seeds",
+                  not fail, "; ".join(fail) if fail else "")
+
+
+# ---------------------------------------------------------------------------
 
 def main() -> int:
     tests = [
@@ -118,6 +150,8 @@ def main() -> int:
         test_clifford_unit_norm_shape_dtype,
         test_clifford_stabilizer_amplitudes,
         test_clifford_stochastic,
+        test_mps_all_chi_unit_norm_and_dtype,
+        test_mps_stochastic,
     ]
     failures = 0
     for t in tests:
