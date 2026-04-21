@@ -107,6 +107,70 @@ def tfim_ground_state(seed: int | None = 0, J: float = 1.0, h: float = 1.0,
 
 
 # ---------------------------------------------------------------------------
+# Heisenberg antiferromagnet ground state (10-site, OBC)
+# ---------------------------------------------------------------------------
+
+# Like TFIM, the Hamiltonian is deterministic; cache the ground state.
+_HEISENBERG_CACHE: dict[tuple[int, float, bool], np.ndarray] = {}
+
+
+def _build_heisenberg_hamiltonian(n: int, J: float, periodic: bool = False) -> sp.csr_matrix:
+    """H = J sum_i (sigma^x_i sigma^x_{i+1} + sigma^y_i sigma^y_{i+1} + sigma^z_i sigma^z_{i+1}).
+
+    Pauli convention; J > 0 is antiferromagnetic. OBC by default.
+    """
+    sx = sp.csr_matrix(np.array([[0, 1], [1, 0]], dtype=np.complex128))
+    sy = sp.csr_matrix(np.array([[0, -1j], [1j, 0]], dtype=np.complex128))
+    sz = sp.csr_matrix(np.array([[1, 0], [0, -1]], dtype=np.complex128))
+    I2 = sp.identity(2, format="csr", dtype=np.complex128)
+
+    def kron_op(local_ops: list[sp.csr_matrix]) -> sp.csr_matrix:
+        op = local_ops[0]
+        for next_op in local_ops[1:]:
+            op = sp.kron(op, next_op, format="csr")
+        return op
+
+    H = sp.csr_matrix((1 << n, 1 << n), dtype=np.complex128)
+    pairs = list(range(n - 1))
+    if periodic and n > 2:
+        pairs.append(n - 1)
+    for i in pairs:
+        for s_op in (sx, sy, sz):
+            ops = [I2] * n
+            ops[i] = s_op
+            ops[(i + 1) % n] = s_op
+            H = H + J * kron_op(ops)
+    return H.tocsr()
+
+
+def heisenberg_ground_state(seed: int | None = 0, J: float = 1.0,
+                             periodic: bool = False) -> np.ndarray:
+    """Ground state of the 10-qubit antiferromagnetic Heisenberg chain (OBC).
+
+    Deterministic up to a seed-dependent global phase (matches the TFIM
+    interface so per-sample QJL projection seeds remain independent).
+    """
+    key = (N_QUBITS, J, periodic)
+    if key not in _HEISENBERG_CACHE:
+        H = _build_heisenberg_hamiltonian(N_QUBITS, J, periodic)
+        v0 = np.ones(DIM, dtype=np.complex128) / np.sqrt(DIM)
+        eigvals, eigvecs = spla.eigsh(H, k=1, which="SA", v0=v0, tol=1e-12)
+        gs = eigvecs[:, 0].astype(np.complex128)
+        gs = gs / np.linalg.norm(gs)
+        nonzero = np.flatnonzero(np.abs(gs) > 1e-12)
+        if nonzero.size:
+            phase = gs[nonzero[0]] / np.abs(gs[nonzero[0]])
+            gs = gs / phase
+        _HEISENBERG_CACHE[key] = gs
+    gs = _HEISENBERG_CACHE[key].copy()
+    if seed is not None:
+        rng = np.random.default_rng(int(seed))
+        phi = rng.uniform(0.0, 2.0 * np.pi)
+        gs = np.exp(1j * phi) * gs
+    return gs
+
+
+# ---------------------------------------------------------------------------
 # Random matrix-product state with bond dimension chi=16
 # ---------------------------------------------------------------------------
 
@@ -155,4 +219,5 @@ STATE_GENERATORS = {
     "haar": haar_random,
     "tfim": tfim_ground_state,
     "mps": random_mps,
+    "heisenberg": heisenberg_ground_state,
 }
