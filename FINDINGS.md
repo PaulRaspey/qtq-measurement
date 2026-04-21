@@ -38,3 +38,28 @@ capture. Net: under top-k or percentile, this pipeline does have a legitimate ph
 compression story — TFIM beats Haar by ~3 percentage points of fidelity at the same bit budget,
 or reaches near-lossless reconstruction at compression ratios where Haar caps at ~0.96.
 
+## v3 — robustness sweep across physical state classes (n = 20 / cell, full pipeline, 3/3 bits, top-k k=8)
+
+Extending v2 to four new state classes (10-site OBC Heisenberg AFM ground state; random MPS at χ=2 and
+χ=4; random Clifford-circuit state, depth 200) sharpens the physical-state claim. Combined results
+at 3/3 with top-k: **Haar 0.9582**, MPS-χ=16 0.9572, MPS-χ=4 0.9543, MPS-χ=2 0.9551, **Heisenberg
+0.9805**, **TFIM 0.9890**, **Clifford 1.0000** (each ± 0.001–0.004 across n=20). Three findings:
+**(1) Heisenberg generalizes the v2 result**: critical-point local-Hamiltonian ground states do
+compress better than Haar under top-k (+2.2 pp), confirming the v2 asymmetry is not TFIM-specific —
+but the route differs. Heisenberg's vanilla Lloyd-Max baseline is already 0.9695 (vs TFIM 0.8042),
+so the post-WHT magnitude tail is much milder; top-k uplifts by only +0.011 here vs +0.185 for TFIM.
+**(2) Lower-χ MPS does not recover any structure advantage** — χ=2, χ=4, χ=16 all sit indistinguishably
+within the 0.95 Haar band under every quantizer, even though χ=2 has minimal entanglement. The top-k
+uplift increases monotonically as χ shrinks (Δ = 0.003 → 0.005 → 0.006 for χ=16/4/2), but the
+absolute fidelity does not improve over Haar at any χ. Random MPS being structured *as an MPS*
+does not imply heavy-tailed magnitudes in the WHT basis. Bond dimension is the wrong axis for
+predicting WHT-basis compressibility. **(3) Clifford reconstructs to F = 1.0000 across all four
+quantizers, including baseline Lloyd-Max.** A stabilizer-prepared state has only one nonzero
+magnitude value (1/√2^k for support size 2^k); post-WHT it remains so degenerate that any reasonable
+codebook is exact. Outlier-aware machinery is irrelevant here. Net read: the v2 claim "physical
+states compress better than random states with outlier-aware quantization" was correct but
+conflated two different mechanisms. The pipeline detects *L2-mass localization in the
+Walsh-Hadamard basis*. TFIM and Heisenberg have it (heavy tail → top-k essential). Clifford has
+an extreme version of it (full degeneracy → trivial compression). Random MPS does not have it at
+any tested χ. So "physicality" is not the relevant axis; "WHT-basis L2-mass concentration" is, and
+that is satisfied by some but not all physical state classes.
