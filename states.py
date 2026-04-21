@@ -212,6 +212,69 @@ def random_mps(seed: int | None = None, chi: int = 16) -> np.ndarray:
 
 
 # ---------------------------------------------------------------------------
+# Random Clifford-circuit state
+# ---------------------------------------------------------------------------
+
+CLIFFORD_DEFAULT_DEPTH = 200
+
+
+def _apply_single_qubit_gate(psi: np.ndarray, gate: np.ndarray, qubit: int,
+                              n: int) -> np.ndarray:
+    """Apply a 2x2 gate to `qubit` (0 = leftmost / most significant) of an n-qubit state."""
+    left_dim = 1 << qubit
+    right_dim = 1 << (n - 1 - qubit)
+    psi_r = psi.reshape(left_dim, 2, right_dim)
+    return np.einsum("ab,lbr->lar", gate, psi_r).reshape(-1)
+
+
+def _apply_cnot(psi: np.ndarray, control: int, target: int, n: int) -> np.ndarray:
+    """CNOT with `control` and `target` qubits (0 = leftmost). Vectorized over basis."""
+    d = psi.shape[0]
+    indices = np.arange(d)
+    c_bits = (indices >> (n - 1 - control)) & 1
+    target_mask = 1 << (n - 1 - target)
+    flipped = indices ^ target_mask
+    return np.where(c_bits == 1, psi[flipped], psi)
+
+
+_H_GATE = (1.0 / np.sqrt(2.0)) * np.array([[1, 1], [1, -1]], dtype=np.complex128)
+_S_GATE = np.array([[1, 0], [0, 1j]], dtype=np.complex128)
+
+
+def random_clifford_state(seed: int | None = None,
+                           depth: int = CLIFFORD_DEFAULT_DEPTH) -> np.ndarray:
+    """Apply `depth` uniformly random Clifford generators ({H, S, CNOT}) to |0...0>.
+
+    Generator set per gate:
+      - H on a uniformly random qubit
+      - S on a uniformly random qubit
+      - CNOT on a uniformly random ordered pair of distinct qubits
+    The output is a stabilizer state: every nonzero amplitude has magnitude
+    1/sqrt(2^k) for some k in {0, ..., N_QUBITS}.
+    """
+    rng = np.random.default_rng(seed)
+    psi = np.zeros(DIM, dtype=np.complex128)
+    psi[0] = 1.0
+    n = N_QUBITS
+    for _ in range(depth):
+        kind = rng.integers(0, 3)
+        if kind == 0:
+            q = int(rng.integers(0, n))
+            psi = _apply_single_qubit_gate(psi, _H_GATE, q, n)
+        elif kind == 1:
+            q = int(rng.integers(0, n))
+            psi = _apply_single_qubit_gate(psi, _S_GATE, q, n)
+        else:
+            c = int(rng.integers(0, n))
+            t = int(rng.integers(0, n - 1))
+            if t >= c:
+                t += 1
+            psi = _apply_cnot(psi, c, t, n)
+    # Renormalize against accumulated FP drift.
+    return psi / np.linalg.norm(psi)
+
+
+# ---------------------------------------------------------------------------
 # Registry
 # ---------------------------------------------------------------------------
 
@@ -220,4 +283,5 @@ STATE_GENERATORS = {
     "tfim": tfim_ground_state,
     "mps": random_mps,
     "heisenberg": heisenberg_ground_state,
+    "clifford": random_clifford_state,
 }
