@@ -127,6 +127,85 @@ def test_full_pipeline_runs_on_real_states() -> bool:
                   "; ".join(fail) if fail else "")
 
 
+# ---------------------------------------------------------------------------
+# v2: outlier-aware magnitude quantizers
+# ---------------------------------------------------------------------------
+
+V2_QUANTIZERS = ("topk", "log", "percentile")
+
+
+def test_v2_quantizers_preserve_unit_norm() -> bool:
+    """Each v2 quantizer must yield a unit-norm reconstruction on a Haar state."""
+    rng = np.random.default_rng(11)
+    psi = (rng.standard_normal(1024) + 1j * rng.standard_normal(1024)).astype(np.complex128)
+    psi /= np.linalg.norm(psi)
+    fail = []
+    for q in V2_QUANTIZERS:
+        payload = pl.compress(psi, "wht_mag", bits_mag=3, mag_quantizer=q)
+        psi_hat = pl.decompress(payload)
+        err = abs(np.linalg.norm(psi_hat) - 1.0)
+        if err >= 1e-10:
+            fail.append(f"{q}: |||psi_hat||-1| = {err:.2e}")
+    return _check("v2 quantizers preserve unit norm", not fail,
+                  "; ".join(fail) if fail else "")
+
+
+def test_v2_quantizers_basis_state_fidelity() -> bool:
+    """Basis state should round-trip to F >= 0.999 through each v2 quantizer (full pipeline)."""
+    psi = np.zeros(1024, dtype=np.complex128)
+    psi[100] = 1.0
+    fail = []
+    for q in V2_QUANTIZERS:
+        for bits in (2, 3, 4):
+            payload = pl.compress(psi, "full", bits_mag=bits, bits_phase=bits,
+                                  mag_quantizer=q, qjl_seed=0)
+            psi_hat = pl.decompress(payload)
+            f = pl.fidelity(psi, psi_hat)
+            if f < 0.999:
+                fail.append(f"{q}@{bits}b: F={f:.4f}")
+    return _check("v2 quantizers F>=0.999 on basis state at all bit budgets", not fail,
+                  "; ".join(fail) if fail else "")
+
+
+def test_v2_quantizers_high_bits_near_lossless() -> bool:
+    """At a generous bit budget, each v2 quantizer should give wht_mag F > 0.999.
+
+    "Lossless at full precision" interpreted operationally: 10 bits per magnitude
+    (1024 codebook entries) should be enough that the dominant remaining error
+    is float32 truncation of the codebook, not the quantization itself. We use
+    wht_mag (raw phases) so phase quant doesn't pollute the test.
+    """
+    rng = np.random.default_rng(22)
+    psi = (rng.standard_normal(1024) + 1j * rng.standard_normal(1024)).astype(np.complex128)
+    psi /= np.linalg.norm(psi)
+    fail = []
+    for q in V2_QUANTIZERS:
+        payload = pl.compress(psi, "wht_mag", bits_mag=10, mag_quantizer=q)
+        psi_hat = pl.decompress(payload)
+        f = pl.fidelity(psi, psi_hat)
+        if f < 0.999:
+            fail.append(f"{q}@10b: F={f:.6f}")
+    return _check("v2 quantizers near-lossless at 10-bit budget", not fail,
+                  "; ".join(fail) if fail else "")
+
+
+def test_v2_quantizers_bit_accounting_finite() -> bool:
+    """compressed_bits must produce a positive finite count for each v2 variant."""
+    rng = np.random.default_rng(33)
+    psi = (rng.standard_normal(1024) + 1j * rng.standard_normal(1024)).astype(np.complex128)
+    psi /= np.linalg.norm(psi)
+    fail = []
+    for q in V2_QUANTIZERS:
+        payload = pl.compress(psi, "full", bits_mag=3, bits_phase=3,
+                              mag_quantizer=q, qjl_seed=0)
+        bits = pl.compressed_bits(payload)
+        ratio = pl.compression_ratio(payload)
+        if not (0 < bits < pl.original_bits(1024) * 10) or not np.isfinite(ratio):
+            fail.append(f"{q}: bits={bits}, ratio={ratio}")
+    return _check("v2 bit accounting yields finite positive ratios", not fail,
+                  "; ".join(fail) if fail else "")
+
+
 def main() -> int:
     tests = [
         test_wht_self_inverse,
@@ -137,6 +216,10 @@ def main() -> int:
         test_states_unit_norm,
         test_states_dim,
         test_full_pipeline_runs_on_real_states,
+        test_v2_quantizers_preserve_unit_norm,
+        test_v2_quantizers_basis_state_fidelity,
+        test_v2_quantizers_high_bits_near_lossless,
+        test_v2_quantizers_bit_accounting_finite,
     ]
     failures = 0
     for t in tests:

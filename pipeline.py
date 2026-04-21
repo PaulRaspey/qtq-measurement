@@ -123,6 +123,126 @@ def mag_quant_decode(indices: np.ndarray, codebook: np.ndarray) -> np.ndarray:
 
 
 # ---------------------------------------------------------------------------
+# Stage 2 alternates: outlier-aware magnitude quantizers
+# ---------------------------------------------------------------------------
+#
+# Each alternate is a drop-in replacement for `mag_quant_encode` /
+# `mag_quant_decode`: it consumes a magnitude vector (length d), produces some
+# encoded representation that the decoder maps back to a length-d magnitude
+# vector. The decoder output goes through the same `mags * exp(1j*phases)`
+# recombination + inverse WHT + renormalize as before.
+#
+# v2 (this follow-up) adds three: top-k exact + Lloyd-Max residual,
+# log-domain Lloyd-Max, and percentile-clipped Lloyd-Max. Each is designed
+# to handle heavy-tailed magnitude distributions better than plain Lloyd-Max.
+
+LOG_EPS = 1e-12
+DEFAULT_PERCENTILE = 99.0
+DEFAULT_TOPK = 8
+COUNT_BITS = 16  # bits to store outlier-count in percentile-clip header
+
+
+def topk_lloyd_encode(magnitudes: np.ndarray, bits: int, k: int = DEFAULT_TOPK
+                       ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Top-k exact + Lloyd-Max on the rest.
+
+    Identifies the k indices with largest |c|, stores those magnitudes
+    losslessly (float32), and Lloyd-Max-quantizes the remaining d-k entries
+    at the requested bit budget. Returns (topk_idx, topk_vals, rest_indices,
+    rest_codebook). `topk_idx` is sorted ascending for deterministic
+    serialization.
+    """
+    d = magnitudes.shape[0]
+    if k >= d:
+        raise ValueError(f"k={k} must be strictly less than d={d}")
+    n_levels = 1 << bits
+    topk_idx = np.argpartition(magnitudes, -k)[-k:]
+    topk_idx = np.sort(topk_idx).astype(np.int32)
+    topk_vals = magnitudes[topk_idx].astype(np.float32)
+    rest_mask = np.ones(d, dtype=bool)
+    rest_mask[topk_idx] = False
+    rest_mags = magnitudes[rest_mask]
+    rest_codebook = lloyd_max_codebook(rest_mags, n_levels)
+    boundaries = (rest_codebook[:-1] + rest_codebook[1:]) / 2.0
+    rest_indices = np.searchsorted(boundaries, rest_mags).astype(np.int32)
+    return topk_idx, topk_vals, rest_indices, rest_codebook
+
+
+def topk_lloyd_decode(topk_idx: np.ndarray, topk_vals: np.ndarray,
+                      rest_indices: np.ndarray, rest_codebook: np.ndarray,
+                      d: int) -> np.ndarray:
+    out = np.zeros(d, dtype=np.float64)
+    rest_mask = np.ones(d, dtype=bool)
+    rest_mask[topk_idx] = False
+    out[rest_mask] = rest_codebook[rest_indices]
+    out[topk_idx] = topk_vals.astype(np.float64)
+    return out
+
+
+def log_lloyd_encode(magnitudes: np.ndarray, bits: int
+                      ) -> tuple[np.ndarray, np.ndarray]:
+    """Lloyd-Max in log space.
+
+    Quantizes log(|c| + LOG_EPS) instead of |c|; better-conditioned for
+    distributions spanning multiple orders of magnitude. The codebook stored
+    holds log-space centroids; decode applies exp() and clips negatives that
+    can arise from numerical underflow near zero.
+    """
+    n_levels = 1 << bits
+    log_mags = np.log(magnitudes + LOG_EPS)
+    codebook = lloyd_max_codebook(log_mags, n_levels)
+    boundaries = (codebook[:-1] + codebook[1:]) / 2.0
+    indices = np.searchsorted(boundaries, log_mags).astype(np.int32)
+    return indices, codebook
+
+
+def log_lloyd_decode(indices: np.ndarray, codebook: np.ndarray) -> np.ndarray:
+    log_mags = codebook[indices]
+    out = np.exp(log_mags) - LOG_EPS
+    return np.clip(out, 0.0, None)
+
+
+def percentile_clip_encode(magnitudes: np.ndarray, bits: int,
+                            percentile: float = DEFAULT_PERCENTILE
+                            ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Outliers above `percentile` stored exact; Lloyd-Max trained on the *remaining* bulk only.
+
+    For percentile=99 on d=1024, ~10 entries land in the outlier tail. The
+    bulk distribution (with outliers fully removed, not clipped in place) is
+    much less skewed, so Lloyd-Max allocates centroids only across the actual
+    bulk and doesn't waste any on the threshold spike. Returns
+    (outlier_idx, outlier_vals, bulk_indices, bulk_codebook); `bulk_indices`
+    has length d - n_outliers, indexed in original-position order over the
+    bulk.
+    """
+    d = magnitudes.shape[0]
+    n_levels = 1 << bits
+    threshold = np.percentile(magnitudes, percentile)
+    outlier_mask = magnitudes > threshold
+    outlier_idx = np.flatnonzero(outlier_mask).astype(np.int32)
+    outlier_vals = magnitudes[outlier_mask].astype(np.float32)
+    bulk_mags = magnitudes[~outlier_mask]
+    bulk_codebook = lloyd_max_codebook(bulk_mags, n_levels)
+    boundaries = (bulk_codebook[:-1] + bulk_codebook[1:]) / 2.0
+    bulk_indices = np.searchsorted(boundaries, bulk_mags).astype(np.int32)
+    return outlier_idx, outlier_vals, bulk_indices, bulk_codebook
+
+
+def percentile_clip_decode(outlier_idx: np.ndarray, outlier_vals: np.ndarray,
+                            bulk_indices: np.ndarray, bulk_codebook: np.ndarray,
+                            d: int) -> np.ndarray:
+    out = np.zeros(d, dtype=np.float64)
+    bulk_mask = np.ones(d, dtype=bool)
+    bulk_mask[outlier_idx] = False
+    out[bulk_mask] = bulk_codebook[bulk_indices]
+    out[outlier_idx] = outlier_vals.astype(np.float64)
+    return out
+
+
+MAG_QUANTIZERS = ("lloyd", "topk", "log", "percentile")
+
+
+# ---------------------------------------------------------------------------
 # Stage 3: Phase quantization (uniform on [0, 2*pi))
 # ---------------------------------------------------------------------------
 
@@ -217,11 +337,23 @@ class Payload:
     d: int
     bits_mag: int
     bits_phase: int
+    mag_quantizer: str = "lloyd"   # one of MAG_QUANTIZERS
     # WHT-only fallback (uncompressed complex post-WHT vector).
     wht_only: Optional[np.ndarray] = None
-    # Magnitude stream + codebook.
+    # Magnitude stream + codebook (always populated for non-WHT configs;
+    # interpretation depends on `mag_quantizer`):
+    #   lloyd      -> direct Lloyd-Max indices/codebook over |c|
+    #   topk       -> Lloyd-Max indices/codebook over the d-k non-topk entries
+    #   log        -> Lloyd-Max indices/codebook over log(|c|+LOG_EPS)
+    #   percentile -> Lloyd-Max indices/codebook over the clipped bulk (length d)
     mag_indices: Optional[np.ndarray] = None
     mag_codebook: Optional[np.ndarray] = None
+    # Top-k extras (mag_quantizer == "topk").
+    topk_idx: Optional[np.ndarray] = None
+    topk_vals: Optional[np.ndarray] = None
+    # Percentile-clip extras (mag_quantizer == "percentile").
+    outlier_idx: Optional[np.ndarray] = None
+    outlier_vals: Optional[np.ndarray] = None
     # Untouched phases when phase stage is skipped.
     raw_phases: Optional[np.ndarray] = None
     # Phase indices when phase stage is on.
@@ -236,20 +368,70 @@ class Payload:
 CONFIGS = ("wht", "wht_mag", "wht_mag_phase", "full")
 
 
+def _encode_magnitudes(payload: Payload, magnitudes: np.ndarray, bits: int,
+                        topk: int, percentile: float) -> None:
+    """Run the chosen magnitude quantizer and stash its state on `payload`."""
+    if payload.mag_quantizer == "lloyd":
+        idx, cb = mag_quant_encode(magnitudes, bits)
+        payload.mag_indices = idx
+        payload.mag_codebook = cb
+    elif payload.mag_quantizer == "topk":
+        topk_idx, topk_vals, rest_indices, rest_cb = topk_lloyd_encode(magnitudes, bits, k=topk)
+        payload.topk_idx = topk_idx
+        payload.topk_vals = topk_vals
+        payload.mag_indices = rest_indices
+        payload.mag_codebook = rest_cb
+    elif payload.mag_quantizer == "log":
+        idx, cb = log_lloyd_encode(magnitudes, bits)
+        payload.mag_indices = idx
+        payload.mag_codebook = cb
+    elif payload.mag_quantizer == "percentile":
+        out_idx, out_vals, bulk_idx, bulk_cb = percentile_clip_encode(magnitudes, bits,
+                                                                       percentile=percentile)
+        payload.outlier_idx = out_idx
+        payload.outlier_vals = out_vals
+        payload.mag_indices = bulk_idx
+        payload.mag_codebook = bulk_cb
+    else:
+        raise ValueError(f"unknown mag_quantizer {payload.mag_quantizer!r}")
+
+
+def _decode_magnitudes(payload: Payload) -> np.ndarray:
+    if payload.mag_quantizer == "lloyd":
+        return mag_quant_decode(payload.mag_indices, payload.mag_codebook)
+    if payload.mag_quantizer == "topk":
+        return topk_lloyd_decode(payload.topk_idx, payload.topk_vals,
+                                 payload.mag_indices, payload.mag_codebook, payload.d)
+    if payload.mag_quantizer == "log":
+        return log_lloyd_decode(payload.mag_indices, payload.mag_codebook)
+    if payload.mag_quantizer == "percentile":
+        return percentile_clip_decode(payload.outlier_idx, payload.outlier_vals,
+                                      payload.mag_indices, payload.mag_codebook, payload.d)
+    raise ValueError(f"unknown mag_quantizer {payload.mag_quantizer!r}")
+
+
 def compress(psi: np.ndarray, config: str, bits_mag: int = 3, bits_phase: int = 3,
-             qjl_m: Optional[int] = None, qjl_seed: int = 0) -> Payload:
+             qjl_m: Optional[int] = None, qjl_seed: int = 0,
+             mag_quantizer: str = "lloyd", topk: int = DEFAULT_TOPK,
+             percentile: float = DEFAULT_PERCENTILE) -> Payload:
     """Run `psi` (unit-norm C^d) through the pipeline up to `config`.
 
     Configs (cumulative):
         "wht"            -> WHT only, store complex result.
-        "wht_mag"        -> + Lloyd-Max magnitude quantization, raw phases kept.
+        "wht_mag"        -> + magnitude quantization, raw phases kept.
         "wht_mag_phase"  -> + uniform phase quantization.
         "full"           -> + QJL 1-bit residual correction.
+
+    `mag_quantizer` selects the stage-2 algorithm; see MAG_QUANTIZERS. `topk`
+    only applies to mag_quantizer="topk"; `percentile` only to "percentile".
     """
     if config not in CONFIGS:
         raise ValueError(f"config must be one of {CONFIGS}, got {config!r}")
+    if mag_quantizer not in MAG_QUANTIZERS:
+        raise ValueError(f"mag_quantizer must be one of {MAG_QUANTIZERS}, got {mag_quantizer!r}")
     d = psi.shape[0]
-    payload = Payload(config=config, d=d, bits_mag=bits_mag, bits_phase=bits_phase)
+    payload = Payload(config=config, d=d, bits_mag=bits_mag, bits_phase=bits_phase,
+                      mag_quantizer=mag_quantizer)
 
     transformed = wht(psi)
 
@@ -259,9 +441,7 @@ def compress(psi: np.ndarray, config: str, bits_mag: int = 3, bits_phase: int = 
 
     magnitudes = np.abs(transformed)
     phases = np.angle(transformed)
-    mag_indices, mag_codebook = mag_quant_encode(magnitudes, bits_mag)
-    payload.mag_indices = mag_indices
-    payload.mag_codebook = mag_codebook
+    _encode_magnitudes(payload, magnitudes, bits_mag, topk=topk, percentile=percentile)
 
     if config == "wht_mag":
         payload.raw_phases = phases.copy()
@@ -289,7 +469,7 @@ def _decompress_wht_only(payload: Payload) -> np.ndarray:
 
 
 def _decompress_wht_mag(payload: Payload) -> np.ndarray:
-    mags = mag_quant_decode(payload.mag_indices, payload.mag_codebook)
+    mags = _decode_magnitudes(payload)
     transformed = mags * np.exp(1j * payload.raw_phases)
     psi_hat = iwht(transformed.astype(np.complex128))
     norm = np.linalg.norm(psi_hat)
@@ -299,7 +479,7 @@ def _decompress_wht_mag(payload: Payload) -> np.ndarray:
 
 
 def _decompress_wht_mag_phase(payload: Payload) -> np.ndarray:
-    mags = mag_quant_decode(payload.mag_indices, payload.mag_codebook)
+    mags = _decode_magnitudes(payload)
     phases = phase_quant_decode(payload.phase_indices, payload.bits_phase)
     transformed = mags * np.exp(1j * phases)
     psi_hat = iwht(transformed.astype(np.complex128))
@@ -341,6 +521,34 @@ def original_bits(d: int) -> int:
     return 2 * d * FLOAT_BITS
 
 
+def _magnitude_stage_bits(payload: Payload) -> int:
+    """Bits for whichever magnitude quantizer is in use."""
+    d = payload.d
+    bits = payload.bits_mag
+    n_levels = 1 << bits
+    if payload.mag_quantizer == "lloyd":
+        return n_levels * FLOAT_BITS + d * bits
+    if payload.mag_quantizer == "topk":
+        k = int(payload.topk_idx.shape[0])
+        idx_bits = max(1, int(np.ceil(np.log2(d))))
+        return (k * idx_bits             # top-k positions
+                + k * FLOAT_BITS         # top-k values (full precision)
+                + (d - k) * bits         # rest indices
+                + n_levels * FLOAT_BITS) # rest codebook
+    if payload.mag_quantizer == "log":
+        # Same byte-shape as lloyd; LOG_EPS is a constant by convention.
+        return n_levels * FLOAT_BITS + d * bits
+    if payload.mag_quantizer == "percentile":
+        n_out = int(payload.outlier_idx.shape[0])
+        idx_bits = max(1, int(np.ceil(np.log2(d))))
+        return (COUNT_BITS                  # outlier count header (variable)
+                + n_out * idx_bits          # outlier positions
+                + n_out * FLOAT_BITS        # outlier values (full precision)
+                + (d - n_out) * bits        # bulk indices (length d - n_out)
+                + n_levels * FLOAT_BITS)    # bulk codebook
+    raise ValueError(f"unknown mag_quantizer {payload.mag_quantizer!r}")
+
+
 def compressed_bits(payload: Payload) -> int:
     """Total bits used to represent the payload, including any sent metadata."""
     d = payload.d
@@ -350,11 +558,7 @@ def compressed_bits(payload: Payload) -> int:
         # keeps the WHT-only point honest as the upper-fidelity baseline.
         return 2 * d * FLOAT_BITS
 
-    bits = 0
-    # Magnitudes: codebook (2^bits floats) + d indices.
-    n_mag_levels = 1 << payload.bits_mag
-    bits += n_mag_levels * FLOAT_BITS          # codebook
-    bits += d * payload.bits_mag               # indices
+    bits = _magnitude_stage_bits(payload)
 
     if payload.config == "wht_mag":
         # Raw phases: d floats (unquantized).
