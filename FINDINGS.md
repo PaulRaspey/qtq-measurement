@@ -63,3 +63,28 @@ Walsh-Hadamard basis*. TFIM and Heisenberg have it (heavy tail → top-k essenti
 an extreme version of it (full degeneracy → trivial compression). Random MPS does not have it at
 any tested χ. So "physicality" is not the relevant axis; "WHT-basis L2-mass concentration" is, and
 that is satisfied by some but not all physical state classes.
+
+## v4 — direct measurement of the predictor (n = 20 / cell, k* at 90% L2 mass)
+
+v3 named *"WHT-basis L2-mass concentration"* as the operative variable; v4 measures it.
+For each state class we compute k\*(0.9) — the smallest number of post-WHT magnitudes whose
+squared sum reaches 90% of the L2 norm — and correlate it against the v3 top-k fidelity at
+3/3 bits. Results: TFIM 42→0.989, Heisenberg 56→0.981, MPS-χ=2 303→0.955, MPS-χ=4
+376→0.954, MPS-χ=16 536→0.957, Haar 604→0.958, Clifford 542→1.000. The data does **not**
+fit a single continuous predictor; instead k\* discriminates **three regimes**.
+**(1) Heavy-tail regime (k\* < ~100):** TFIM and Heisenberg. Top-k recovers fidelity by
+exact preservation of the small set of L2-mass-dominant outliers, and within this regime
+k\* sharply tracks fidelity (though the regime contains only two examples). **(2) Bulk
+regime (k\* ~ 300–600):** Haar, MPS at χ=2/4/16. All four cluster at F ≈ 0.954–0.958
+regardless of k\* — Spearman ρ(k\*, F) = −0.486 (p = 0.33) across the six non-Clifford
+classes. The strong-looking Pearson r = −0.836 (p = 0.038) is misleading: it is almost
+entirely leverage from the two heavy-tail points. **(3) Degenerate regime (Clifford):**
+k\* = 542 (mid-range) but F = 1.000 across every quantizer. Magnitude degeneracy makes
+baseline Lloyd-Max exact; k\* is the wrong metric here. Net read: the v3 asymmetry framing
+holds — physical critical-point ground states do compress dramatically better — but the
+mechanism summary tightens to *two distinct routes to compressibility (heavy-tailed
+post-WHT magnitudes, magnitude degeneracy), and a bulk regime where amplitude-quantization
+pipelines provide no state-class advantage over Haar*. That is a more nuanced and harder-
+to-attack claim than "k\* predicts fidelity." It also identifies the next experiment cleanly:
+v5 should look for a second metric that discriminates within the bulk, or test whether a
+non-WHT basis (DCT, identity, learned rotation) shifts random MPS out of the bulk regime.
