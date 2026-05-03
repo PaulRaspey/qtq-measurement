@@ -145,3 +145,35 @@ simulated-quantization probe per basis); (b) hybrid score combining concentratio
 degeneracy detector so Clifford-like states default safely to WHT. The Heisenberg gap is the
 larger immediate target than Clifford regression — Clifford can be defended by routing to WHT
 when k\* is uncertain.
+
+## v7 — smarter encoder-side basis selectors (n = 20 / cell, top-k k=8, 3/3 bits, 7 strategies)
+
+v6 left two open gaps: k\*(0.9) missed Heisenberg by 1.05 pp (oracle picks DCT) and broke
+Clifford F=1.0 by misrouting on high-variance seeds. v7 tests four alternative encoder-side
+selectors against WHT-only baseline, the v6 k\*(0.9), and oracle.
+**Selectors:** (1) k\*(0.5) — top-of-tail concentration. (2) topk_mass — direct L2 mass in
+the top-k=8 entries. (3) quant_probe — cheap simulation: run the pipeline at the target bit
+budget *minus* QJL in each candidate basis, pick highest reconstructed F. (4) hybrid —
+magnitude-degeneracy detector first (defaults to WHT for stabilizer-like states), then
+quant_probe on the rest.
+**Result.** Mean gap-to-oracle across the 7 state classes: k\*(0.9) +0.39 pp, k\*(0.5)
++0.79 pp, topk_mass +0.94 pp, **quant_probe +0.006 pp, hybrid +0.006 pp**. Worst-case gap:
+quant_probe and hybrid both at +0.014 pp (sampling noise) on MPS-χ=16; the simpler
+selectors are dominated by their worst case (topk_mass loses 4.66 pp on Clifford by
+picking DCT every seed and breaking the magnitude degeneracy). The Heisenberg gap is fully
+closed — quant_probe picks DCT every seed for Heisenberg, matching oracle, lifting WHT-only
+0.9805 → 0.9909. Surprise: Clifford F=1.0 is preserved by quant_probe even without the
+explicit degeneracy detector — it picks WHT 12 times and identity 8 times across 20 seeds,
+and identity also achieves F=1 on Clifford (identity preserves the stabilizer-state
+structure; QJL handles the phase-quantization error). DCT is the basis that breaks
+Clifford, and quant_probe correctly avoids it.
+**Net read.** The cheap quant_probe matches oracle to within sampling noise at ~10% of the
+computational cost (three pipelines without the QJL `scipy.optimize` step, then one full
+pipeline in the chosen basis). The v4/v5 k\* metric remains useful for *understanding*
+state-class structure (the three-regime story still holds), but for *operating* the
+basis-adaptive pipeline the right encoder-side score is the simulated-quantization probe,
+not k\*. The hybrid variant is functionally equivalent to quant_probe at the tested seeds
+but adds a structural safety net (degeneracy detector) for stabilizer-like states. v7
+fully closes the v6 predictor question; the basis-adaptive pipeline now operates at
+oracle quality.
+

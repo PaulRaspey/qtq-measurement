@@ -679,3 +679,21 @@ def compress_adaptive_oracle(psi: np.ndarray, config: str = "full",
             best_fid = f
             best_payload = p
     return best_payload
+
+
+def compress_adaptive_with_selector(psi: np.ndarray, selector,
+                                     config: str = "full",
+                                     bits_mag: int = 3, bits_phase: int = 3,
+                                     mag_quantizer: str = "topk",
+                                     topk: int = DEFAULT_TOPK,
+                                     qjl_seed: int = 0,
+                                     bases: tuple = SUPPORTED_BASES) -> Payload:
+    """Run any (psi, bases)->basis selector then compress in the chosen basis.
+
+    `selector` must be a callable that accepts (psi, bases) and returns a
+    basis name string. See `basis_selectors.py` for v7 selector functions.
+    """
+    chosen = selector(psi, bases)
+    return compress(psi, config=config, bits_mag=bits_mag, bits_phase=bits_phase,
+                    mag_quantizer=mag_quantizer, topk=topk, qjl_seed=qjl_seed,
+                    basis=chosen)
