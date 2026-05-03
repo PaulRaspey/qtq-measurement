@@ -338,7 +338,11 @@ class Payload:
     bits_mag: int
     bits_phase: int
     mag_quantizer: str = "lloyd"   # one of MAG_QUANTIZERS
-    # WHT-only fallback (uncompressed complex post-WHT vector).
+    # Orthogonal basis applied before quantization (v6+; default "wht" keeps
+    # v1/v2/v3 byte accounting unchanged). Decoder needs the same basis.
+    basis: str = "wht"
+    # WHT-only (or chosen-basis-only) fallback: uncompressed complex
+    # post-transform vector. Field name kept for v1/v2/v3 backward compat.
     wht_only: Optional[np.ndarray] = None
     # Magnitude stream + codebook (always populated for non-WHT configs;
     # interpretation depends on `mag_quantizer`):
@@ -366,6 +370,36 @@ class Payload:
 
 
 CONFIGS = ("wht", "wht_mag", "wht_mag_phase", "full")
+
+
+# ---------------------------------------------------------------------------
+# Basis pluggability (v6+)
+# ---------------------------------------------------------------------------
+#
+# By default the pipeline applies a normalized WHT before quantization.
+# v6 allows the encoder to pick among orthogonal bases per vector. The
+# decoder reads `payload.basis` and inverts accordingly. Two-bit basis tag
+# is charged in `compressed_bits` only when basis != "wht", so the v1/v2/v3
+# byte accounting is preserved.
+
+SUPPORTED_BASES = ("wht", "dct", "identity")
+BASIS_TAG_BITS = 2  # log2(3) ~= 1.58; round up. WHT-only path pays 0.
+
+
+def _apply_forward_basis(psi: np.ndarray, basis: str) -> np.ndarray:
+    if basis == "wht":
+        return wht(psi)
+    # Defer the import; concentration_basis imports pipeline (for wht/iwht),
+    # so a top-level import here would create a circular dependency.
+    from concentration_basis import transform_in_basis
+    return transform_in_basis(psi, basis)
+
+
+def _apply_inverse_basis(coeffs: np.ndarray, basis: str) -> np.ndarray:
+    if basis == "wht":
+        return iwht(coeffs)
+    from concentration_basis import inverse_transform_in_basis
+    return inverse_transform_in_basis(coeffs, basis)
 
 
 def _encode_magnitudes(payload: Payload, magnitudes: np.ndarray, bits: int,
@@ -413,17 +447,21 @@ def _decode_magnitudes(payload: Payload) -> np.ndarray:
 def compress(psi: np.ndarray, config: str, bits_mag: int = 3, bits_phase: int = 3,
              qjl_m: Optional[int] = None, qjl_seed: int = 0,
              mag_quantizer: str = "lloyd", topk: int = DEFAULT_TOPK,
-             percentile: float = DEFAULT_PERCENTILE) -> Payload:
+             percentile: float = DEFAULT_PERCENTILE,
+             basis: str = "wht") -> Payload:
     """Run `psi` (unit-norm C^d) through the pipeline up to `config`.
 
     Configs (cumulative):
-        "wht"            -> WHT only, store complex result.
+        "wht"            -> chosen-basis transform only, store complex result.
         "wht_mag"        -> + magnitude quantization, raw phases kept.
         "wht_mag_phase"  -> + uniform phase quantization.
         "full"           -> + QJL 1-bit residual correction.
 
     `mag_quantizer` selects the stage-2 algorithm; see MAG_QUANTIZERS. `topk`
     only applies to mag_quantizer="topk"; `percentile` only to "percentile".
+    `basis` selects the orthogonal transform applied before quantization;
+    default "wht" preserves v1/v2/v3 behavior. v6+ allows "dct" or "identity";
+    decoder reads payload.basis and inverts accordingly.
     """
     if config not in CONFIGS:
         raise ValueError(f"config must be one of {CONFIGS}, got {config!r}")
@@ -431,9 +469,9 @@ def compress(psi: np.ndarray, config: str, bits_mag: int = 3, bits_phase: int = 
         raise ValueError(f"mag_quantizer must be one of {MAG_QUANTIZERS}, got {mag_quantizer!r}")
     d = psi.shape[0]
     payload = Payload(config=config, d=d, bits_mag=bits_mag, bits_phase=bits_phase,
-                      mag_quantizer=mag_quantizer)
+                      mag_quantizer=mag_quantizer, basis=basis)
 
-    transformed = wht(psi)
+    transformed = _apply_forward_basis(psi, basis)
 
     if config == "wht":
         payload.wht_only = transformed.copy()
@@ -465,13 +503,13 @@ def compress(psi: np.ndarray, config: str, bits_mag: int = 3, bits_phase: int = 
 
 
 def _decompress_wht_only(payload: Payload) -> np.ndarray:
-    return iwht(payload.wht_only)
+    return _apply_inverse_basis(payload.wht_only, payload.basis)
 
 
 def _decompress_wht_mag(payload: Payload) -> np.ndarray:
     mags = _decode_magnitudes(payload)
     transformed = mags * np.exp(1j * payload.raw_phases)
-    psi_hat = iwht(transformed.astype(np.complex128))
+    psi_hat = _apply_inverse_basis(transformed.astype(np.complex128), payload.basis)
     norm = np.linalg.norm(psi_hat)
     if norm > 0:
         psi_hat = psi_hat / norm
@@ -482,7 +520,7 @@ def _decompress_wht_mag_phase(payload: Payload) -> np.ndarray:
     mags = _decode_magnitudes(payload)
     phases = phase_quant_decode(payload.phase_indices, payload.bits_phase)
     transformed = mags * np.exp(1j * phases)
-    psi_hat = iwht(transformed.astype(np.complex128))
+    psi_hat = _apply_inverse_basis(transformed.astype(np.complex128), payload.basis)
     norm = np.linalg.norm(psi_hat)
     if norm > 0:
         psi_hat = psi_hat / norm
@@ -563,18 +601,19 @@ def compressed_bits(payload: Payload) -> int:
     if payload.config == "wht_mag":
         # Raw phases: d floats (unquantized).
         bits += d * FLOAT_BITS
-        return bits
+    else:
+        # Phase indices.
+        bits += d * payload.bits_phase
+        if payload.config != "wht_mag_phase":
+            # QJL: m sign bits + scale alpha + seed handle.
+            bits += payload.qjl_m * 1
+            bits += SCALE_BITS                  # alpha
+            bits += SEED_BITS                   # seed (so decoder regenerates P)
 
-    # Phase indices.
-    bits += d * payload.bits_phase
-
-    if payload.config == "wht_mag_phase":
-        return bits
-
-    # QJL: m sign bits + scale alpha + seed handle.
-    bits += payload.qjl_m * 1
-    bits += SCALE_BITS                          # alpha
-    bits += SEED_BITS                           # seed (so decoder regenerates P)
+    # v6+: charge basis-tag bits only when basis != "wht" so v1/v2/v3 byte
+    # accounting (and the recorded results_v*.csv ratios) are unchanged.
+    if payload.basis != "wht":
+        bits += BASIS_TAG_BITS
     return bits
 
 
@@ -589,3 +628,54 @@ def compression_ratio(payload: Payload) -> float:
 def fidelity(psi: np.ndarray, psi_hat: np.ndarray) -> float:
     """F = |<psi|psi_hat>|^2."""
     return float(np.abs(np.vdot(psi, psi_hat)) ** 2)
+
+
+# ---------------------------------------------------------------------------
+# v6: basis-adaptive selectors
+# ---------------------------------------------------------------------------
+#
+# Two selection strategies. `compress_adaptive_kstar` is the realistic
+# encoder: it picks the basis with the smallest k*(0.9) -- a single scalar
+# the encoder can compute cheaply -- without ever running the full pipeline
+# in alternative bases. `compress_adaptive_oracle` is the upper bound: try
+# all bases at full cost, pick the one with the highest reconstructed
+# fidelity. The gap between the two tells us how good a predictor k* is
+# for the actual quantity we care about (fidelity).
+
+def compress_adaptive_kstar(psi: np.ndarray, config: str = "full",
+                             bits_mag: int = 3, bits_phase: int = 3,
+                             mag_quantizer: str = "topk", topk: int = DEFAULT_TOPK,
+                             qjl_seed: int = 0,
+                             bases: tuple = SUPPORTED_BASES,
+                             threshold: float = 0.9) -> Payload:
+    """Pick the basis with smallest k*(threshold), then run the pipeline there."""
+    from concentration_basis import k_star_in_basis
+    best_basis = None
+    best_k = None
+    for b in bases:
+        k = k_star_in_basis(psi, threshold, b)
+        if best_k is None or k < best_k:
+            best_k = k
+            best_basis = b
+    return compress(psi, config=config, bits_mag=bits_mag, bits_phase=bits_phase,
+                    mag_quantizer=mag_quantizer, topk=topk, qjl_seed=qjl_seed,
+                    basis=best_basis)
+
+
+def compress_adaptive_oracle(psi: np.ndarray, config: str = "full",
+                              bits_mag: int = 3, bits_phase: int = 3,
+                              mag_quantizer: str = "topk", topk: int = DEFAULT_TOPK,
+                              qjl_seed: int = 0,
+                              bases: tuple = SUPPORTED_BASES) -> Payload:
+    """Try every basis, return the payload that decodes to the highest fidelity."""
+    best_payload = None
+    best_fid = -1.0
+    for b in bases:
+        p = compress(psi, config=config, bits_mag=bits_mag, bits_phase=bits_phase,
+                     mag_quantizer=mag_quantizer, topk=topk, qjl_seed=qjl_seed, basis=b)
+        psi_hat = decompress(p)
+        f = fidelity(psi, psi_hat)
+        if f > best_fid:
+            best_fid = f
+            best_payload = p
+    return best_payload

@@ -118,3 +118,30 @@ reasonable default but not optimal; a basis-adaptive compressor would strictly b
 current pipeline on TFIM, tie or marginally beat on Heisenberg / MPS-χ=2, and is the natural
 v6 direction (encoder picks among {WHT, DCT, identity} per vector at the cost of ~2 extra
 bits per state for the basis tag).
+
+## v6 — basis-adaptive pipeline (n = 20 / cell, top-k k=8, 3/3 bits, three strategies)
+
+v5 said the right basis depends on the state class. v6 actually exploits that: the encoder
+picks the basis per vector and sends a 2-bit tag; the decoder reads the tag and inverts. Two
+adaptive strategies are compared against the WHT-only baseline. **k\*-adaptive** (realistic):
+compute k\*(0.9) in WHT, DCT, identity; pick the smallest. **Oracle**: try all three bases at
+full pipeline cost; pick the one with highest decoded fidelity. Three outcomes:
+**(1) Wins:** TFIM 0.9890 → 0.9947 (+0.57 pp, k\* matches oracle perfectly — both always pick
+DCT). Bulk states (Haar, MPS at any χ) gain modestly under oracle (+0.1–0.3 pp); k\*-adaptive
+is essentially neutral or slightly negative because the 2-bit tag overhead isn't recovered when
+the basis change doesn't help. **(2) k\*(0.9) misses Heisenberg by 1.05 pp:** WHT 0.9804 →
+k\*-adaptive 0.9804 → oracle **0.9909**. k\*(0.9) for Heisenberg is 56 in WHT, 56 in identity,
+95 in DCT — so k\* picks WHT — but the oracle picks DCT every single seed and gets a +1.05 pp
+lift. DCT spreads Heisenberg's energy across more entries (95 vs 56) but the *largest* entries
+are relatively bigger, and that is what top-k actually exploits. Concentration-at-90% does not
+capture top-of-the-tail shape. **(3) k\*(0.9) destroys Clifford F = 1:** WHT 1.0000 →
+k\*-adaptive 0.9934 → oracle 1.0000. Clifford's WHT k\* has high cross-seed variance (std 272);
+on some seeds the encoder routes to DCT or identity, breaking the magnitude-degeneracy
+mechanism that makes Lloyd-Max exact. The F=1 mechanism is invisible to k\*. **Net read:** the
+basis-adaptive idea is real (TFIM +0.57 pp banked, Heisenberg +1.05 pp on the table, MPS
++0.1–0.3 pp on the table); the encoder-side predictor needs to be smarter than k\*(0.9). v7
+directions: (a) better encoder-side scoring (top-of-tail metric like k\*(0.5), or a small
+simulated-quantization probe per basis); (b) hybrid score combining concentration with a
+degeneracy detector so Clifford-like states default safely to WHT. The Heisenberg gap is the
+larger immediate target than Clifford regression — Clifford can be defended by routing to WHT
+when k\* is uncertain.

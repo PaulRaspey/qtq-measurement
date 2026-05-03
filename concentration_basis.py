@@ -30,13 +30,29 @@ SUPPORTED_BASES = ("wht", "dct", "identity")
 def transform_in_basis(psi: np.ndarray, basis: str) -> np.ndarray:
     """Apply the named orthogonal transform to a complex statevector."""
     if basis == "identity":
-        return psi
+        return psi.astype(np.complex128, copy=True)
     if basis == "wht":
         return pl.wht(psi)
     if basis == "dct":
         # DCT-II with norm='ortho' is orthogonal; apply to real and imag separately.
         real = dct(np.real(psi), type=2, norm="ortho")
         imag = dct(np.imag(psi), type=2, norm="ortho")
+        return (real + 1j * imag).astype(np.complex128)
+    raise ValueError(f"unknown basis {basis!r}; expected one of {SUPPORTED_BASES}")
+
+
+def inverse_transform_in_basis(coeffs: np.ndarray, basis: str) -> np.ndarray:
+    """Apply the inverse of `transform_in_basis(_, basis)` to coefficients."""
+    if basis == "identity":
+        return coeffs.astype(np.complex128, copy=True)
+    if basis == "wht":
+        # Normalized WHT is involutive.
+        return pl.iwht(coeffs)
+    if basis == "dct":
+        # idct with type=2, norm='ortho' inverts dct(type=2, norm='ortho').
+        from scipy.fft import idct
+        real = idct(np.real(coeffs), type=2, norm="ortho")
+        imag = idct(np.imag(coeffs), type=2, norm="ortho")
         return (real + 1j * imag).astype(np.complex128)
     raise ValueError(f"unknown basis {basis!r}; expected one of {SUPPORTED_BASES}")
 
