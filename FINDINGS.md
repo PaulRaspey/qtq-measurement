@@ -88,3 +88,33 @@ pipelines provide no state-class advantage over Haar*. That is a more nuanced an
 to-attack claim than "k\* predicts fidelity." It also identifies the next experiment cleanly:
 v5 should look for a second metric that discriminates within the bulk, or test whether a
 non-WHT basis (DCT, identity, learned rotation) shifts random MPS out of the bulk regime.
+
+## v5 — basis-dependence of L2-mass concentration (n = 20 / cell, k* at 90% L2 mass, three bases)
+
+v3/v4 framed the operative variable as *"WHT-basis L2-mass concentration."* v5 tests whether
+that framing is intrinsic to the state classes or specific to the WHT basis. Three orthogonal
+bases at d=1024: Walsh-Hadamard (the pipeline default), DCT-II (ortho-normalized), and identity
+(no transform). Three findings.
+**(1) Haar invariance: confirmed.** k\*(0.9) = 604 / 605 / 600 across WHT / DCT / Identity (spread
+0.8% of mean), as predicted by unitary invariance of the Haar measure.
+**(2) The bulk regime survives the basis change.** Random MPS at every tested χ stays in the
+bulk (k\* > 270) in every basis. Largest basis-induced reduction is MPS-χ=2 dropping from
+k\*=303 (WHT) to k\*=274 (identity) — only ~10%, not enough to leave the bulk. The v3 negative
+result on MPS therefore strengthens: random MPS does not have heavy-tailed magnitudes in *any*
+of WHT, DCT, or the computational basis. Bond dimension is the wrong axis for predicting
+amplitude-quantization compressibility under any standard orthogonal basis tested.
+**(3) The "right basis" is state-class-specific and is not always WHT.** TFIM is *most*
+concentrated in **DCT** (k\* = 27) versus WHT's 42 — a 36% reduction. Heisenberg ties at
+k\* = 56 in both WHT and identity (DCT worse at 95). So the two critical-point ground states
+have *different* basis preferences despite both being local-Hamiltonian ground states. Clifford
+is most concentrated in WHT (542); k\* is larger in DCT (599) and identity (668), and the cross-
+seed std of k\* collapses in DCT (33 vs 272 in WHT) — DCT averages out the variable support
+size of random Clifford circuits.
+**Net read.** The earlier "WHT-basis concentration" framing was *almost* right but slightly
+imprecise. The accurate framing: **physical states have state-class-specific bases in which
+their amplitudes are concentrated, while random states (Haar) and random MPS at any χ are
+spread out in every standard orthogonal basis tested.** The pipeline's WHT step is a
+reasonable default but not optimal; a basis-adaptive compressor would strictly beat the
+current pipeline on TFIM, tie or marginally beat on Heisenberg / MPS-χ=2, and is the natural
+v6 direction (encoder picks among {WHT, DCT, identity} per vector at the cost of ~2 extra
+bits per state for the basis tag).
